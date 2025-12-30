@@ -1,0 +1,332 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>生日快乐：梦境魔法系统</title>
+    <style>
+        :root { --pink: #FF69B4; --gold: #FFD700; --violet: #4B0082; --white: #FFFFFF; }
+        body, html { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: #000; font-family: "PingFang SC", sans-serif; }
+
+        /* 启动遮罩 */
+        #launcher {
+            position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+            background: radial-gradient(circle, #1a1a2e 0%, #000 100%);
+            z-index: 1000; display: flex; flex-direction: column; align-items: center; justify-content: center;
+            color: white; text-align: center; cursor: pointer;
+        }
+        .magic-btn {
+            padding: 18px 50px; font-size: 20px; background: var(--pink); border: none;
+            border-radius: 50px; color: white; margin-top: 30px; box-shadow: 0 0 30px var(--pink);
+            animation: pulse 2s infinite;
+        }
+        @keyframes pulse { 0% { transform: scale(1); } 50% { transform: scale(1.05); } 100% { transform: scale(1); } }
+
+        /* UI 指引层 */
+        #ui-overlay {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            pointer-events: none; z-index: 100; display: none;
+            flex-direction: column; align-items: center; justify-content: space-between;
+            padding: 40px 20px; box-sizing: border-box;
+        }
+        .text-group { text-align: center; }
+        .main-title {
+            font-size: 42px; font-weight: 900; letter-spacing: 10px;
+            background: linear-gradient(to bottom, #fff, var(--pink), var(--violet));
+            -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+            filter: drop-shadow(0 0 15px rgba(255,105,180,0.5));
+        }
+        .quote { color: rgba(255,255,255,0.7); font-size: 14px; margin-top: 5px; font-style: italic; }
+
+        #hint-box {
+            background: rgba(0,0,0,0.5); backdrop-filter: blur(15px);
+            border: 1px solid rgba(255,105,180,0.3); padding: 15px 30px;
+            border-radius: 40px; color: white; text-align: center;
+        }
+        #step-msg { font-size: 22px; color: var(--gold); font-weight: bold; }
+        #zoom-msg { font-size: 12px; opacity: 0.8; margin-top: 5px; }
+
+        /* 摄像头小窗 */
+        #cam-box {
+            position: absolute; bottom: 20px; right: 20px; width: 120px; height: 90px;
+            border-radius: 12px; overflow: hidden; border: 1px solid var(--pink);
+            transform: scaleX(-1); opacity: 0.6; z-index: 50;
+        }
+        video { width: 100%; height: 100%; object-fit: cover; }
+    </style>
+</head>
+<body>
+
+    <div id="launcher" onclick="startMagic()">
+        <h1 style="letter-spacing: 5px;">梦境魔法花园</h1>
+        <p>愿你眼中总有星辰，心中总有繁花</p>
+        <button class="magic-btn">点击开启魔法之旅</button>
+    </div>
+
+    <div id="ui-overlay">
+        <div class="text-group">
+            <div class="main-title">生日快乐</div>
+            <div class="quote">“岁岁常欢愉，年年皆胜意。”</div>
+        </div>
+
+        <div id="hint-box">
+            <div id="step-msg">正在唤醒星光...</div>
+            <div id="zoom-msg">✨ 张合手指控制粒子收放</div>
+        </div>
+    </div>
+
+    <div id="cam-box"><video id="webcam" autoplay playsinline muted></video></div>
+
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+                "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+            }
+        }
+    </script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+        import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+        import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+
+        let scene, camera, renderer, composer, clock;
+        let particles, geometry, stars, fwGeo, fwPoints;
+        const COUNT = 18000; 
+        const FW_COUNT = 2500;
+
+        let state = 0; 
+        let isTransitioning = false;
+        let scaleVal = 1.0;
+        let rotationY = 0;
+
+        const targetPos = new Float32Array(COUNT * 3);
+        const targetCol = new Float32Array(COUNT * 3);
+        const currentPos = new Float32Array(COUNT * 3);
+
+        const COLORS = { pink: new THREE.Color(0xFF69B4), white: new THREE.Color(0xFFFFFF), gold: new THREE.Color(0xFFD700), violet: new THREE.Color(0x2a0052) };
+
+        window.startMagic = function() {
+            document.getElementById('launcher').style.display = 'none';
+            document.getElementById('ui-overlay').style.display = 'flex';
+            init();
+        }
+
+        async function init() {
+            scene = new THREE.Scene();
+            camera = new THREE.PerspectiveCamera(60, window.innerWidth/window.innerHeight, 0.1, 1000);
+            camera.position.z = 8;
+
+            renderer = new THREE.WebGLRenderer({ antialias: false });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
+            document.body.appendChild(renderer.domElement);
+
+            composer = new EffectComposer(renderer);
+            composer.addPass(new RenderPass(scene, camera));
+            const bloom = new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 1.2, 0.4, 0.8);
+            composer.addPass(bloom);
+
+            createStarBackground();
+            createMainParticles();
+            createFireworkSystem();
+            setupHands();
+            setShape(0);
+
+            window.addEventListener('resize', onResize);
+            clock = new THREE.Clock();
+            animate();
+        }
+
+        function createStarBackground() {
+            const starGeo = new THREE.BufferGeometry();
+            const pos = new Float32Array(1500 * 3);
+            for(let i=0; i<1500; i++) {
+                pos[i*3] = (Math.random()-0.5)*60; pos[i*3+1] = (Math.random()-0.5)*60; pos[i*3+2] = (Math.random()-0.5)*40 - 15;
+            }
+            starGeo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+            stars = new THREE.Points(starGeo, new THREE.PointsMaterial({ size: 0.03, color: 0xffffff, transparent: true, opacity: 0.8 }));
+            scene.add(stars);
+        }
+
+        function createMainParticles() {
+            geometry = new THREE.BufferGeometry();
+            const cols = new Float32Array(COUNT * 3);
+            for(let i=0; i<COUNT; i++) {
+                currentPos[i*3]=(Math.random()-0.5)*20; currentPos[i*3+1]=(Math.random()-0.5)*20; currentPos[i*3+2]=(Math.random()-0.5)*10;
+            }
+            geometry.setAttribute('position', new THREE.BufferAttribute(currentPos, 3));
+            geometry.setAttribute('color', new THREE.BufferAttribute(cols, 3));
+            particles = new THREE.Points(geometry, new THREE.PointsMaterial({ size: 0.04, vertexColors: true, transparent: true, blending: THREE.AdditiveBlending }));
+            scene.add(particles);
+        }
+
+        function createFireworkSystem() {
+            fwGeo = new THREE.BufferGeometry();
+            const pos = new Float32Array(FW_COUNT * 3);
+            const cols = new Float32Array(FW_COUNT * 3);
+            for(let i=0; i<FW_COUNT; i++) pos[i*3] = 9999;
+            fwGeo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+            fwGeo.setAttribute('color', new THREE.BufferAttribute(cols, 3));
+            fwPoints = new THREE.Points(fwGeo, new THREE.PointsMaterial({ size: 0.03, vertexColors: true, blending: THREE.AdditiveBlending }));
+            scene.add(fwPoints);
+        }
+
+        function setShape(s) {
+            if (isTransitioning) return;
+            isTransitioning = true;
+            state = s;
+            
+            const pts = [];
+            if (s === 0) { 
+                for(let i=0; i<COUNT; i++) {
+                    targetPos[i*3]=(Math.random()-0.5)*12; targetPos[i*3+1]=(Math.random()-0.5)*10; targetPos[i*3+2]=(Math.random()-0.5)*6;
+                    const c = i%2===0?COLORS.violet:COLORS.gold; targetCol[i*3]=c.r; targetCol[i*3+1]=c.g; targetCol[i*3+2]=c.b;
+                }
+            } else if (s === 1) { 
+                for(let y=-2.5; y<2.5; y+=0.1) pts.push(new THREE.Vector3(0,y,0));
+                for(let i=0; i<40; i++) pts.push(new THREE.Vector3(-i*0.03, 2.5-i*0.03, 0));
+                for(let x=-0.8; x<0.8; x+=0.1) pts.push(new THREE.Vector3(x, -2.5, 0));
+                applyPoints(pts, COLORS.gold, 0.5);
+            } else if (s === 2) { 
+                const curve = new THREE.CatmullRomCurve3([
+                    new THREE.Vector3(-0.7, 0.7, 0),  
+                    new THREE.Vector3(0, 1.8, 0),     
+                    new THREE.Vector3(1.1, 0.8, 0),   
+                    new THREE.Vector3(-1.1, -2.0, 0), 
+                ]);
+                curve.getPoints(100).forEach(p => pts.push(p));
+                for(let x=-1.1; x<=1.1; x+=0.1) pts.push(new THREE.Vector3(x, -2.0, 0)); 
+                applyPoints(pts, COLORS.gold, 0.6);
+            } else if (s === 3) { 
+                const top = new THREE.EllipseCurve(0, 1.1, 1.2, 1.2, -Math.PI/2.2, Math.PI*1.1, false, 0);
+                const bot = new THREE.EllipseCurve(0, -1.1, 1.2, 1.2, -Math.PI*1.1, Math.PI/2.2, false, 0);
+                top.getPoints(80).forEach(p => pts.push(new THREE.Vector3(p.x, p.y, 0)));
+                bot.getPoints(80).forEach(p => pts.push(new THREE.Vector3(p.x, p.y, 0)));
+                applyPoints(pts, COLORS.gold, 0.6);
+            } else { // 蛋糕状态
+                for(let i=0; i<COUNT; i++) {
+                    const ratio = i/COUNT;
+                    if(ratio < 0.8) { // 蛋糕主体渐变
+                        const layer = ratio < 0.4 ? 0 : (ratio < 0.7 ? 1 : 2);
+                        const rad = [2.4, 1.6, 0.9][layer], h_base = [-2.2, -0.8, 0.5][layer];
+                        const ang = Math.random()*Math.PI*2, d = Math.sqrt(Math.random())*rad;
+                        targetPos[i*3]=Math.cos(ang)*d; targetPos[i*3+2]=Math.sin(ang)*d; targetPos[i*3+1]=h_base+Math.random()*1.2;
+                        const c = COLORS.pink.clone().lerp(COLORS.white, (targetPos[i*3+1]+2.2)/4.5);
+                        targetCol[i*3]=c.r; targetCol[i*3+1]=c.g; targetCol[i*3+2]=c.b;
+                    } else { // 精美漂亮丝带 (双螺旋缠绕)
+                        const ribbonRatio = (ratio - 0.8) / 0.2; // 0 to 1
+                        const spiralAngle = ribbonRatio * Math.PI * 2 * 6; // 绕6圈
+                        const y = -2.2 + ribbonRatio * 4.5; // 从底到顶
+                        // 丝带半径随高度动态收缩（贴合蛋糕）
+                        const rad = 2.6 - ribbonRatio * 1.6;
+                        // 加一点点随机扰动使丝带更有质感
+                        const noise = (Math.random() - 0.5) * 0.15;
+                        targetPos[i*3] = Math.cos(spiralAngle) * (rad + noise);
+                        targetPos[i*3+2] = Math.sin(spiralAngle) * (rad + noise);
+                        targetPos[i*3+1] = y;
+                        // 丝带采用明亮的纯白色粒子
+                        targetCol[i*3]=1.0; targetCol[i*3+1]=1.0; targetCol[i*3+2]=1.0;
+                    }
+                }
+            }
+            setTimeout(() => { isTransitioning = false; }, 1200);
+        }
+
+        function applyPoints(pts, col, thick) {
+            for(let i=0; i<COUNT; i++) {
+                const b = pts[i%pts.length], ang = Math.random()*Math.PI*2, r = Math.sqrt(Math.random())*thick;
+                targetPos[i*3]=b.x+Math.cos(ang)*r; targetPos[i*3+1]=b.y+Math.sin(ang)*r; targetPos[i*3+2]=(Math.random()-0.5)*thick;
+                targetCol[i*3]=col.r; targetCol[i*3+1]=col.g; targetCol[i*3+2]=col.b;
+            }
+        }
+
+        async function setupHands() {
+            const hands = new Hands({ locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}` });
+            hands.setOptions({ maxNumHands: 1, modelComplexity: 1, minDetectionConfidence: 0.75, minTrackingConfidence: 0.75 });
+            hands.onResults(onHandResults);
+            const video = document.getElementById('webcam');
+            const cameraPipe = new Camera(video, { onFrame: async () => { await hands.send({image: video}); }, width: 480, height: 360 });
+            cameraPipe.start();
+        }
+
+        let buffer = [];
+        function onHandResults(results) {
+            const msg = document.getElementById('step-msg');
+            if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+                const marks = results.multiHandLandmarks[0];
+                scaleVal = THREE.MathUtils.mapLinear(Math.hypot(marks[4].x - marks[8].x, marks[4].y - marks[8].y), 0.05, 0.35, 0.5, 3.0);
+                rotationY = (marks[0].x - 0.5) * 5;
+                let f = 0; const isExt = (tip, pip) => Math.hypot(marks[tip].x-marks[0].x, marks[tip].y-marks[0].y) > Math.hypot(marks[pip].x-marks[0].x, marks[pip].y-marks[0].y) * 1.25;
+                if(isExt(8,6)) f++; if(isExt(12,10)) f++; if(isExt(16,14)) f++; if(isExt(20,18)) f++;
+                if(Math.hypot(marks[4].x-marks[17].x, marks[4].y-marks[17].y) > 0.2) f++;
+                buffer.push(f); if(buffer.length > 8) buffer.shift();
+                const sf = buffer.reduce((a,b,i,arr)=> (arr.filter(v=>v===a).length >= arr.filter(v=>v===b).length ? a : b), 0);
+                if(!isTransitioning) {
+                    if (state === 4) { msg.innerText = "🎆 比出 1 魔法重置"; if(sf === 1) setShape(0); }
+                    else { msg.innerText = `识别：${sf} 指 | 尝试比出 ${state + 1}`; if(sf === state + 1) setShape(sf); }
+                }
+            } else { msg.innerText = "请展示手掌开始魔法"; }
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+            const dt = clock.getDelta();
+            const time = clock.getElapsedTime();
+            const pos = geometry.attributes.position.array;
+            const col = geometry.attributes.color.array;
+            for(let i=0; i<COUNT*3; i++) {
+                pos[i] += (targetPos[i] * scaleVal - pos[i]) * 0.1;
+                col[i] += (targetCol[i] - col[i]) * 0.06;
+            }
+            stars.rotation.y += 0.0004;
+            if(state === 4) {
+                particles.rotation.y += 0.005;
+                if(Math.random() < 0.04) launchFirework();
+                updateFireworks(dt);
+            } else {
+                particles.rotation.y = THREE.MathUtils.lerp(particles.rotation.y, rotationY, 0.1);
+            }
+            geometry.attributes.position.needsUpdate = true;
+            geometry.attributes.color.needsUpdate = true;
+            composer.render();
+        }
+
+        function launchFirework() {
+            const origin = new THREE.Vector3((Math.random()-0.5)*18, (Math.random()-0.5)*14, -10);
+            const c = new THREE.Color().setHSL(Math.random(), 1, 0.6);
+            for(let i=0; i<80; i++) {
+                activeFws.push({ p: origin.clone(), v: new THREE.Vector3((Math.random()-0.5)*0.3, (Math.random()-0.5)*0.3, (Math.random()-0.5)*0.3), l: 1.0, c: c });
+                if(activeFws.length > FW_COUNT) activeFws.shift();
+            }
+        }
+
+        function updateFireworks(dt) {
+            const fPos = fwGeo.attributes.position.array;
+            const fCol = fwGeo.attributes.color.array;
+            for(let i=0; i<FW_COUNT; i++) {
+                const f = activeFws[i];
+                if(f && f.l > 0) {
+                    f.p.add(f.v); f.v.y -= 0.004; f.l -= dt * 0.7;
+                    fPos[i*3]=f.p.x; fPos[i*3+1]=f.p.y; fPos[i*3+2]=f.p.z;
+                    fCol[i*3]=f.c.r*f.l; fCol[i*3+1]=f.c.g*f.l; fCol[i*3+2]=f.c.b*f.l;
+                } else fPos[i*3]=9999;
+            }
+            fwGeo.attributes.position.needsUpdate = true;
+            fwGeo.attributes.color.needsUpdate = true;
+        }
+
+        function onResize() {
+            camera.aspect = window.innerWidth/window.innerHeight; camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            composer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        const activeFws = [];
+    </script>
+</body>
+</html>
